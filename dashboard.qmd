@@ -1,5 +1,383 @@
 ---
-title: Dashboard
-format: dashboard
+title: "California Proposition 50 Analysis"
+subtitle: "Gerrymandering Impact Assessment"
+format: 
+  dashboard:
+    orientation: columns
 ---
 
+```{r setup, include=FALSE}
+library(tidyverse)
+library(scales)
+
+# Load cleaned precinct data
+precinct_data <- read_csv("data/g24_sov_by_g24_svprec_clean.csv", show_col_types = FALSE)
+
+# Prepare 2024 results by district
+results_2024 <- precinct_data %>%
+  group_by(CDDIST) %>%
+  summarize(
+    dem_votes = sum(CNGDEM01, na.rm = TRUE) + sum(CNGDEM02, na.rm = TRUE),
+    rep_votes = sum(CNGREP01, na.rm = TRUE) + sum(CNGREP02, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    total_votes = dem_votes + rep_votes,
+    dem_share = dem_votes / total_votes,
+    winner = if_else(dem_votes > rep_votes, "DEM", "REP")
+  )
+
+# Try to load proposed map results
+if(file.exists("data/new_district_results.csv")) {
+  results_proposed <- read_csv("data/new_district_results.csv", show_col_types = FALSE) %>%
+    mutate(
+      total_votes = dem_votes_allocated + rep_votes_allocated,
+      dem_share = dem_votes_allocated / total_votes,
+      winner = if_else(dem_votes_allocated > rep_votes_allocated, "DEM", "REP")
+    )
+  has_proposed_data <- TRUE
+} else {
+  has_proposed_data <- FALSE
+  results_proposed <- NULL
+}
+
+# Calculate metrics function
+calc_metrics <- function(results, dem_col, rep_col) {
+  results <- results %>%
+    mutate(
+      votes_to_win = (get(dem_col) + get(rep_col)) / 2,
+      dem_wasted = if_else(get(dem_col) > get(rep_col),
+                           get(dem_col) - votes_to_win,
+                           get(dem_col)),
+      rep_wasted = if_else(get(rep_col) > get(dem_col),
+                           get(rep_col) - votes_to_win,
+                           get(rep_col))
+    )
+  
+  list(
+    seats_dem = sum(results$winner == "DEM"),
+    seats_rep = sum(results$winner == "REP"),
+    mean_median = mean(results$dem_share, na.rm = TRUE) - median(results$dem_share, na.rm = TRUE),
+    efficiency_gap = (sum(results$rep_wasted) - sum(results$dem_wasted)) / sum(results[[dem_col]] + results[[rep_col]])
+  )
+}
+
+# Calculate metrics
+metrics_2024 <- calc_metrics(results_2024, "dem_votes", "rep_votes")
+
+if(has_proposed_data) {
+  metrics_proposed <- calc_metrics(results_proposed, "dem_votes_allocated", "rep_votes_allocated")
+}
+```
+
+# Overview
+
+## Column {width=65%}
+
+### Key Findings
+
+```{r key-findings}
+if(has_proposed_data) {
+  seat_change <- metrics_proposed$seats_dem - metrics_2024$seats_dem
+  eg_change <- abs(metrics_proposed$efficiency_gap) - abs(metrics_2024$efficiency_gap)
+  
+  cat("**Research Question:** Will the adoption of the new district map lead to an increase in partisan advantage relative to 2024?\n\n")
+  
+  if(abs(eg_change) > 0.02) {
+    cat("**Answer:** YES - The proposed map shows a", round(abs(eg_change) * 100, 2), 
+        "percentage point increase in partisan advantage.\n\n")
+  } else {
+    cat("**Answer:** NO - The change in partisan advantage is minimal (", 
+        round(abs(eg_change) * 100, 2), "pp).\n\n")
+  }
+  
+  cat("**Seat Changes:**\n")
+  cat("- Democratic seats change:", seat_change, "\n")
+  cat("- Republican seats change:", -seat_change, "\n\n")
+  
+  cat("**Metric Changes:**\n")
+  cat("- Efficiency Gap change:", round(eg_change * 100, 2), "percentage points\n")
+  cat("- Mean-Median Score change:", round(metrics_proposed$mean_median - metrics_2024$mean_median, 4), "\n")
+} else {
+  cat("**Note:** Proposed map results not yet available.\n")
+  cat("Complete Part 5 to generate hypothetical redistricting results.\n")
+}
+```
+
+### Seat Distribution Comparison
+
+```{r seats-viz}
+if(has_proposed_data) {
+  seats_df <- tibble(
+    Map = rep(c("2024 Map", "Proposed Map"), each = 2),
+    Party = rep(c("Democratic", "Republican"), 2),
+    Seats = c(metrics_2024$seats_dem, metrics_2024$seats_rep,
+              metrics_proposed$seats_dem, metrics_proposed$seats_rep)
+  )
+  
+  ggplot(seats_df, aes(x = Map, y = Seats, fill = Party)) +
+    geom_col(position = "dodge", width = 0.7) +
+    scale_fill_manual(values = c("Democratic" = "#2E5EAA", "Republican" = "#C8102E")) +
+    geom_text(aes(label = Seats), position = position_dodge(width = 0.7), vjust = -0.5, size = 5) +
+    labs(
+      title = "Congressional Seat Distribution",
+      y = "Number of Seats",
+      x = NULL
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 12),
+      plot.title = element_text(size = 14, face = "bold")
+    ) +
+    ylim(0, max(seats_df$Seats) + 5)
+} else {
+  ggplot() + 
+    annotate("text", x = 0.5, y = 0.5, 
+             label = "Proposed map data not available.\nComplete Part 5.", 
+             size = 6) +
+    theme_void()
+}
+```
+
+## Column {width=35%}
+
+### Metrics Comparison
+
+```{r metrics-table}
+if(has_proposed_data) {
+  comparison_df <- tibble(
+    Metric = c("Democratic Seats", "Republican Seats", "Mean-Median Score", "Efficiency Gap (%)"),
+    `2024 Map` = c(
+      metrics_2024$seats_dem,
+      metrics_2024$seats_rep,
+      round(metrics_2024$mean_median, 4),
+      round(metrics_2024$efficiency_gap * 100, 2)
+    ),
+    `Proposed Map` = c(
+      metrics_proposed$seats_dem,
+      metrics_proposed$seats_rep,
+      round(metrics_proposed$mean_median, 4),
+      round(metrics_proposed$efficiency_gap * 100, 2)
+    ),
+    Change = c(
+      metrics_proposed$seats_dem - metrics_2024$seats_dem,
+      metrics_proposed$seats_rep - metrics_2024$seats_rep,
+      round(metrics_proposed$mean_median - metrics_2024$mean_median, 4),
+      round((metrics_proposed$efficiency_gap - metrics_2024$efficiency_gap) * 100, 2)
+    )
+  )
+  
+  knitr::kable(comparison_df, align = "lrrr")
+} else {
+  cat("Proposed map results not available.\n")
+  cat("Run Part 5 to generate redistricting data.")
+}
+```
+
+### Interpretation Guide
+
+**Mean-Median Score:**
+- Difference between mean and median Democratic vote share
+- Positive value: Democrats may have advantage
+- Negative value: Republicans may have advantage
+
+**Efficiency Gap:**
+- Measures asymmetry in "wasted votes"
+- Values above ±7-8% historically considered problematic
+- Positive value: Map favors Democrats
+- Negative value: Map favors Republicans
+
+# District Analysis
+
+## Row {height=50%}
+
+### 2024 Vote Share Distribution
+
+```{r vote-dist-2024}
+ggplot(results_2024, aes(x = dem_share)) +
+  geom_histogram(bins = 20, fill = "#2E5EAA", alpha = 0.7, color = "white") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "red", size = 1) +
+  scale_x_continuous(labels = percent_format(), limits = c(0, 1)) +
+  labs(
+    title = "Distribution of Democratic Vote Share - 2024 Map",
+    x = "Democratic Vote Share",
+    y = "Number of Districts"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 11),
+    plot.title = element_text(size = 13, face = "bold")
+  )
+```
+
+### Proposed Map Vote Share Distribution
+
+```{r vote-dist-proposed}
+if(has_proposed_data) {
+  ggplot(results_proposed, aes(x = dem_share)) +
+    geom_histogram(bins = 20, fill = "#6495ED", alpha = 0.7, color = "white") +
+    geom_vline(xintercept = 0.5, linetype = "dashed", color = "red", size = 1) +
+    scale_x_continuous(labels = percent_format(), limits = c(0, 1)) +
+    labs(
+      title = "Distribution of Democratic Vote Share - Proposed Map",
+      x = "Democratic Vote Share",
+      y = "Number of Districts"
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 11),
+      plot.title = element_text(size = 13, face = "bold")
+    )
+} else {
+  ggplot() + 
+    annotate("text", x = 0.5, y = 0.5, 
+             label = "Proposed map data not available", 
+             size = 6) +
+    theme_void()
+}
+```
+
+## Row {height=50%}
+
+### Competitiveness Comparison
+
+```{r competitiveness}
+if(has_proposed_data) {
+  comp_df <- bind_rows(
+    results_2024 %>%
+      mutate(Map = "2024 Map",
+             margin = abs(dem_share - 0.5) * 100),
+    results_proposed %>%
+      mutate(Map = "Proposed Map",
+             margin = abs(dem_share - 0.5) * 100)
+  )
+  
+  ggplot(comp_df, aes(x = Map, y = margin, fill = Map)) +
+    geom_boxplot(alpha = 0.7) +
+    geom_hline(yintercept = 10, linetype = "dashed", color = "red") +
+    scale_fill_manual(values = c("2024 Map" = "#2E5EAA", "Proposed Map" = "#6495ED")) +
+    labs(
+      title = "District Competitiveness (Margin from 50%)",
+      subtitle = "Lower values = more competitive. Dashed line = 10% margin",
+      y = "Margin from 50% (percentage points)",
+      x = NULL
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      text = element_text(size = 11),
+      plot.title = element_text(size = 13, face = "bold")
+    )
+} else {
+  ggplot() + 
+    annotate("text", x = 0.5, y = 0.5, 
+             label = "Proposed map data not available", 
+             size = 6) +
+    theme_void()
+}
+```
+
+### Summary Statistics
+
+```{r summary-stats}
+if(has_proposed_data) {
+  cat("**2024 Map:**\n")
+  cat("- Competitive districts (margin < 10%):", 
+      sum(abs(results_2024$dem_share - 0.5) * 100 < 10), "\n")
+  cat("- Safe Democratic seats (>55% Dem):", 
+      sum(results_2024$dem_share > 0.55), "\n")
+  cat("- Safe Republican seats (>55% Rep):", 
+      sum(results_2024$dem_share < 0.45), "\n\n")
+  
+  cat("**Proposed Map:**\n")
+  cat("- Competitive districts (margin < 10%):", 
+      sum(abs(results_proposed$dem_share - 0.5) * 100 < 10), "\n")
+  cat("- Safe Democratic seats (>55% Dem):", 
+      sum(results_proposed$dem_share > 0.55), "\n")
+  cat("- Safe Republican seats (>55% Rep):", 
+      sum(results_proposed$dem_share < 0.45), "\n")
+} else {
+  cat("Proposed map results not yet available.\n")
+  cat("Complete Part 5 to generate data.")
+}
+```
+
+# Methodology
+
+## Column
+
+### Data Sources
+
+**Primary Data:**
+- 2024 General Election precinct-level voting data from California Statewide Database
+- SR precinct geographic boundaries (shapefiles)
+- Proposed AB 604 congressional district boundaries
+
+**Data Cleaning:**
+- Converted vote count columns from character to numeric format
+- Validated district and precinct identifiers
+- Filtered out precincts with zero turnout
+- Aggregated votes by congressional district
+
+### Redistricting Methodology
+
+**Approach:** Area-weighted interpolation
+
+We estimated how 2024 voters would have voted under the proposed AB 604 district boundaries using the following process:
+
+1. **Spatial Intersection:** Calculated the geographic overlap between 2024 SR precincts and proposed congressional districts
+
+2. **Area Proportion Calculation:** For each precinct-district overlap, computed what percentage of the precinct's total area falls within each new district
+
+3. **Vote Allocation:** Distributed each precinct's votes proportionally across new districts based on area overlap
+   - Example: If 60% of Precinct A's area is in new District 10, then 60% of Precinct A's votes are allocated to District 10
+
+4. **Aggregation:** Summed allocated votes by new district to produce hypothetical election results under AB 604
+
+**Key Assumption:** Voters are evenly distributed across precinct geography. This simplifies reality but provides a reasonable approximation for analysis.
+
+### Gerrymandering Metrics
+
+**Mean-Median Score**
+
+Compares the mean Democratic vote share across all districts to the median vote share.
+
+- Calculation: Mean vote share - Median vote share
+- Interpretation: Positive values indicate Democrats win more districts with narrower margins (potential packing); negative values indicate the reverse
+
+**Efficiency Gap**
+
+Measures the asymmetry in "wasted votes" between parties.
+
+- Wasted votes = votes beyond what's needed to win (50% + 1) in won districts, or all votes in lost districts
+- Calculation: (Republican wasted votes - Democratic wasted votes) / Total votes
+- Interpretation: 
+  - Positive values: Map favors Democrats
+  - Negative values: Map favors Republicans
+  - Values above ±7-8% historically considered problematic gerrymandering
+
+### Important Caveats
+
+**Limitations of Analysis:**
+
+1. **Area-weighted interpolation assumes uniform voter distribution** within precincts, which may not reflect actual residential patterns
+
+2. **Analysis assumes voting behavior remains constant** under new districts, ignoring potential campaign effects or voter mobilization changes
+
+3. **Single metrics cannot definitively prove gerrymandering intent** - geographic and demographic factors can legitimately create partisan patterns
+
+4. **Same-party races** (Dem vs Dem or Rep vs Rep) were handled by summing all votes for each party, which may not perfectly reflect voter preferences in true two-party contests
+
+5. **Third-party and independent votes** were excluded from efficiency gap calculations to focus on two-party competition
+
+**Data Quality:**
+- Some SR precinct geometries required correction for topological errors
+- Census block splits between precincts introduce minor approximation errors
+- Vote totals validated against official district-level results (discrepancies < 1%)
+
+**Interpretation Guidance:**
+These metrics provide evidence of potential gerrymandering but should be considered alongside other factors including:
+- Communities of interest preservation
+- Compactness of districts
+- Compliance with Voting Rights Act
+- Historical context of California's redistricting process
