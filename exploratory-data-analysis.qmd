@@ -5,24 +5,55 @@ format: typst
 
 ### Question 1
 
-Put your question here.
+Which precinct had the closest race, and what was the vote margin?
 
 ### Answer 1
 
-Put your answer here.
+```{r}
+district_totals <- g24_results_clean |>
+  group_by(district, party) |>
+  summarize(total_votes = sum(votes, na.rm = TRUE), .groups = "drop") |>
+  pivot_wider(names_from = party, values_from = total_votes) |>
+  mutate(
+    margin = abs(DEM - REP),
+    winner = ifelse(DEM > REP, "DEM", "REP")
+  )
+
+closest_races <- district_totals |>
+  arrange(margin) |>
+  slice(1:5)
+
+closest_races
+
+```
 
 ### Question 2
 
-Put your question here.
+Do aggregated district totals from precinct data match the official district-level results?
 
 ### Answer 2
 
-Put your answer here.
+```{r}
+biggest_blowouts <- district_totals |>
+  arrange(desc(margin)) |>
+  slice(1:5)
+
+biggest_blowouts
+
+```
 
 ### Question 3
 
-Put your question here.
+Which candidate won by the largest landslide in any precinct?
 
 ### Answer 3
 
-Put your answer here.
+```{r}
+same_party_districts <- g24_results_clean |>
+  group_by(district) |>
+  summarize(num_parties = n_distinct(party)) |>
+  filter(num_parties == 1)
+
+same_party_districts
+
+```
