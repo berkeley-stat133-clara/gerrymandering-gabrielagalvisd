@@ -2,4 +2,429 @@
 title: Data Cleaning
 format: typst
 ---
+# Part 2: Cleaning 2024 Precinct-Level Data
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(readr)
+```
+
+## Load the data
+
+```{r load-data}
+# Read the precinct-level voting data from 2024 general election
+raw_data <- read_csv("data/g24_sov_by_g24_svprec.csv")
+
+# Examine structure
+glimpse(raw_data)
+cat("\nNumber of rows:", nrow(raw_data), "\n")
+cat("Number of columns:", ncol(raw_data), "\n")
+```
+
+## Data inspection
+
+```{r inspect}
+# Check key identifier columns
+cat("Unique precincts (SVPREC_KEY):", n_distinct(raw_data$SVPREC_KEY), "\n")
+cat("Unique congressional districts (CDDIST):", n_distinct(raw_data$CDDIST), "\n")
+cat("Unique counties:", n_distinct(raw_data$COUNTY), "\n")
+
+# Check for duplicate precinct keys
+duplicates <- raw_data %>% 
+  count(SVPREC_KEY) %>% 
+  filter(n > 1)
+
+if(nrow(duplicates) > 0) {
+  cat("\nWarning: Found", nrow(duplicates), "duplicate SVPREC_KEY values\n")
+  print(head(duplicates))
+} else {
+  cat("\nNo duplicate SVPREC_KEY values - good!\n")
+}
+
+# Examine vote columns - they should be numeric but are character
+cat("\nSample of congressional vote columns:\n")
+raw_data %>% 
+  select(SVPREC_KEY, CDDIST, starts_with("CNG")) %>% 
+  head(10)
+```
+
+## Clean the data
+
+```{r clean}
+clean_data <- raw_data %>%
+  # Convert all vote columns from character to numeric
+  # Columns starting with specific race codes
+  mutate(across(c(
+    # Congressional races
+    starts_with("CNG"),
+    # Presidential race
+    starts_with("PRS"),
+    # Senate races
+    starts_with("SEN"),
+    # US House races
+    starts_with("USP"), starts_with("USS"),
+    # Assembly races
+    starts_with("ASS"),
+    # Propositions
+    starts_with("PR_")
+  ), ~as.numeric(.))) %>%
+  
+  # Also convert summary vote columns
+  mutate(across(c(TOTVOTE, DEMVOTE, REPVOTE, AIPVOTE, GRNVOTE, 
+                  LIBVOTE, NLPVOTE, REFVOTE, DCLVOTE, MSCVOTE, 
+                  PRCVOTE, ABSVOTE), ~as.numeric(.))) %>%
+  
+  # Ensure district identifiers are numeric
+  mutate(
+    COUNTY = as.numeric(COUNTY),
+    CDDIST = as.numeric(CDDIST),
+    ADDIST = as.numeric(ADDIST),
+    SDDIST = as.numeric(SDDIST),
+    BEDIST = as.numeric(BEDIST)
+  ) %>%
+  
+  # Keep precinct identifiers as character
+  mutate(
+    SVPREC = as.character(SVPREC),
+    SVPREC_KEY = as.character(SVPREC_KEY),
+    FIPS = as.character(FIPS)
+  ) %>%
+  
+  # Filter out rows with zero total votes (likely mail ballot precincts with no returns)
+  filter(TOTVOTE > 0 | !is.na(TOTVOTE))
+
+# Verify cleaning worked
+cat("\n=== After Cleaning ===\n")
+cat("Rows remaining:", nrow(clean_data), "\n")
+cat("Rows removed:", nrow(raw_data) - nrow(clean_data), "\n")
+
+# Check that vote columns are now numeric
+glimpse(clean_data %>% select(SVPREC_KEY, CDDIST, starts_with("CNG"), starts_with("PRS")))
+
+# Summary statistics
+summary(clean_data %>% select(TOTVOTE, CDDIST))
+```
+
+## Validate congressional race data
+
+```{r validate-congressional}
+# For congressional races, we need to aggregate votes by district
+# The columns CNGDEM01, CNGDEM02, CNGREP01, CNGREP02 represent different candidates
+# In California's top-two primary, general elections can be Dem vs Dem or Rep vs Rep
+
+# Check which districts have which matchups
+district_matchups <- clean_data %>%
+  group_by(CDDIST) %>%
+  summarize(
+    # Sum votes for each candidate type
+    cng_dem_01 = sum(CNGDEM01, na.rm = TRUE),
+    cng_dem_02 = sum(CNGDEM02, na.rm = TRUE),
+    cng_rep_01 = sum(CNGREP01, na.rm = TRUE),
+    cng_rep_02 = sum(CNGREP02, na.rm = TRUE),
+    cng_ind_01 = sum(CNGIND01, na.rm = TRUE),
+    total_cng_votes = cng_dem_01 + cng_dem_02 + cng_rep_01 + cng_rep_02 + cng_ind_01
+  ) %>%
+  mutate(
+    # Determine race type
+    has_dem = (cng_dem_01 > 0) + (cng_dem_02 > 0),
+    has_rep = (cng_rep_01 > 0) + (cng_rep_02 > 0),
+    has_ind = cng_ind_01 > 0,
+    race_type = case_when(
+      has_dem == 2 & has_rep == 0 ~ "Dem vs Dem",
+      has_rep == 2 & has_dem == 0 ~ "Rep vs Rep",
+      has_dem == 1 & has_rep == 1 ~ "Dem vs Rep",
+      has_ind ~ "Includes Independent",
+      TRUE ~ "Other"
+    )
+  )
+
+cat("\n=== Congressional Race Types by District ===\n")
+district_matchups %>%
+  count(race_type) %>%
+  knitr::kable()
+
+cat("\nSample districts:\n")
+district_matchups %>%
+  select(CDDIST, race_type, total_cng_votes) %>%
+  arrange(CDDIST) %>%
+  head(10) %>%
+  knitr::kable()
+```
+
+## Write cleaned data
+
+```{r write-clean}
+# Write the full cleaned dataset
+write_csv(clean_data, "data/g24_sov_by_g24_svprec_clean.csv")
+
+# Also write a district-level summary for easy reference
+district_summary <- clean_data %>%
+  group_by(CDDIST, COUNTY) %>%
+  summarize(
+    n_precincts = n(),
+    # Congressional votes
+    cng_dem_total = sum(CNGDEM01, na.rm = TRUE) + sum(CNGDEM02, na.rm = TRUE),
+    cng_rep_total = sum(CNGREP01, na.rm = TRUE) + sum(CNGREP02, na.rm = TRUE),
+    cng_ind_total = sum(CNGIND01, na.rm = TRUE),
+    # Presidential votes
+    prs_dem = sum(PRSDEM01, na.rm = TRUE),
+    prs_rep = sum(PRSREP01, na.rm = TRUE),
+    prs_grn = sum(PRSGRN01, na.rm = TRUE),
+    prs_lib = sum(PRSLIB01, na.rm = TRUE),
+    # Total votes
+    total_votes = sum(TOTVOTE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write_csv(district_summary, "data/district_summary_by_county.csv")
+
+cat("\n✓ Cleaned data written to: data/g24_sov_by_g24_svprec_clean.csv\n")
+cat("✓ District summary written to: data/district_summary_by_county.csv\n")
+```
+
+# Part 5: Cleaning SR Precinct Data for Redistricting
+# Approach A: Area-weighted Interpolation
+
+# Approach A: Area-weighted Interpolation
+
+# Approach A: Area-weighted Interpolation
+
+```{r load-sr-data}
+library(sf)
+library(tidyverse)
+
+# Load SR precinct voting data
+cat("Loading SR precinct voting data...\n")
+
+# The file is in data/shapefiles/ folder
+sr_file <- "data/shapefiles/state_g24_sov_data_by_g24_srprec.csv"
+
+if(!file.exists(sr_file)) {
+  stop("SR precinct file not found at: ", sr_file)
+}
+
+cat("Loading from:", sr_file, "\n")
+sr_votes <- read_csv(sr_file, show_col_types = FALSE)
+
+cat("SR precinct data dimensions:", nrow(sr_votes), "rows,", ncol(sr_votes), "columns\n")
+
+# Check the structure
+glimpse(sr_votes)
+```
+
+## Clean SR precinct voting data
+
+```{r clean-sr-votes}
+# Clean SR voting data - same process as SV precincts
+sr_votes_clean <- sr_votes %>%
+  # Convert all vote columns from character to numeric
+  mutate(across(c(
+    # Congressional races
+    starts_with("CNG"),
+    # Presidential race
+    starts_with("PRS"),
+    # Senate races
+    starts_with("SEN"),
+    # US House races
+    starts_with("USP"), starts_with("USS"),
+    # Assembly races
+    starts_with("ASS"),
+    # Propositions
+    starts_with("PR_")
+  ), ~as.numeric(.))) %>%
+  
+  # Also convert summary vote columns
+  mutate(across(c(TOTVOTE, DEMVOTE, REPVOTE, AIPVOTE, GRNVOTE, 
+                  LIBVOTE, NLPVOTE, REFVOTE, DCLVOTE, MSCVOTE, 
+                  PRCVOTE, ABSVOTE), ~as.numeric(.))) %>%
+  
+  # Keep precinct identifier as character
+  mutate(
+    SRPREC = as.character(SRPREC),
+    SRPREC_KEY = as.character(SRPREC_KEY),
+    COUNTY = as.numeric(COUNTY),
+    CDDIST = as.numeric(CDDIST)
+  )
+
+cat("SR votes cleaned:", nrow(sr_votes_clean), "rows\n")
+```
+
+## Load shapefiles
+
+```{r load-shapefiles}
+# Load SR precinct shapefiles
+cat("Loading SR precinct shapefiles...\n")
+sr_shp <- st_read("data/shapefiles/srprec_state_g24_v01_shp/srprec_state_g24_v01_shp.shp", quiet = TRUE)
+cat("SR shapefile loaded:", nrow(sr_shp), "features\n")
+
+# Load proposed congressional map (AB604)
+cat("Loading proposed district map...\n")
+proposed_map <- st_read("data/shapefiles/AB604/AB604.shp", quiet = TRUE)
+cat("Proposed map loaded:", nrow(proposed_map), "districts\n")
+
+# Check what columns are in the shapefiles
+cat("\nSR shapefile columns:\n")
+print(names(sr_shp))
+
+cat("\nProposed map columns:\n")
+print(names(proposed_map))
+```
+## Clean and validate geometries
+
+```{r clean-geometries}
+cat("Cleaning and validating geometries...\n")
+
+# Clean SR precinct geometries
+sr_shp <- sr_shp %>%
+  st_transform(3310) %>%  # California Albers equal area projection
+  st_set_precision(1) %>%  # snap points to 1 m grid
+  st_make_valid() %>%      # fix self-intersections/bow-ties
+  st_collection_extract("POLYGON")
+
+# Clean proposed map geometries
+proposed_map <- proposed_map %>%
+  st_transform(3310) %>%
+  st_make_valid()
+
+cat("Geometries validated\n")
+cat("SR precincts after cleaning:", nrow(sr_shp), "\n")
+cat("Proposed districts after cleaning:", nrow(proposed_map), "\n")
+```
+
+## Join voting data to SR precinct geometries
+
+```{r join-votes-to-geometry}
+# Find the matching column names for the join
+sr_id_col <- names(sr_shp)[str_detect(names(sr_shp), "SRPREC|PREC_KEY|ID")]
+votes_id_col <- names(sr_votes_clean)[str_detect(names(sr_votes_clean), "SRPREC")]
+
+cat("\nJoin columns:\n")
+cat("SR shapefile ID:", sr_id_col[1], "\n")
+cat("SR votes ID:", votes_id_col[1], "\n")
+
+# Join voting data to geometries
+sr_spatial <- sr_shp %>%
+  left_join(sr_votes_clean, by = setNames(votes_id_col[1], sr_id_col[1]))
+
+# Check for successful matches
+n_matched <- sum(!is.na(sr_spatial$TOTVOTE))
+cat("\nMatched", n_matched, "of", nrow(sr_spatial), "precincts to voting data\n")
+
+if(n_matched == 0) {
+  cat("ERROR: No matches found! Checking column names...\n")
+  cat("SR shapefile first 5 ID values:", head(sr_shp[[sr_id_col[1]]], 5), "\n")
+  cat("SR votes first 5 ID values:", head(sr_votes_clean[[votes_id_col[1]]], 5), "\n")
+  stop("Join failed - column names don't match")
+}
+```
+## Perform area-weighted interpolation
+
+```{r interpolation}
+cat("\nCalculating precinct-district intersections...\n")
+cat("This may take a few minutes...\n")
+
+# Calculate intersection of SR precincts with proposed districts
+intersections <- st_intersection(sr_spatial, proposed_map)
+
+cat("Intersections calculated:", nrow(intersections), "polygon pieces\n")
+
+# Calculate area proportions
+cat("Computing area proportions...\n")
+intersections <- intersections %>%
+  mutate(
+    intersection_area = st_area(geometry),
+    # Get the original precinct's total area by matching back
+    precinct_id_for_match = get(sr_id_col[1])
+  )
+
+# Calculate original precinct areas
+precinct_areas <- sr_spatial %>%
+  mutate(
+    precinct_id = get(sr_id_col[1]),
+    total_area = st_area(geometry)
+  ) %>%
+  st_drop_geometry() %>%
+  select(precinct_id, total_area)
+
+# Join back to get proportions
+intersections <- intersections %>%
+  left_join(precinct_areas, by = c("precinct_id_for_match" = "precinct_id")) %>%
+  mutate(area_proportion = as.numeric(intersection_area / total_area))
+
+cat("Area proportions calculated\n")
+cat("Sample proportions:", head(intersections$area_proportion, 10), "\n")
+```
+
+## Allocate votes proportionally
+
+```{r allocate-votes}
+cat("\nAllocating votes proportionally by area...\n")
+
+# Identify the district ID column in the proposed map
+district_col <- names(proposed_map)[str_detect(names(proposed_map), "DISTRICT|DIST|CD")]
+cat("Using district column:", district_col[1], "\n")
+
+# Identify vote columns to allocate
+vote_cols <- names(sr_votes_clean)[str_detect(names(sr_votes_clean), "^CNG|^PRS|^SEN")]
+
+cat("Allocating", length(vote_cols), "vote columns\n")
+
+# Allocate votes proportionally by area
+for(col in vote_cols) {
+  if(col %in% names(intersections) && is.numeric(intersections[[col]])) {
+    intersections[[paste0(col, "_allocated")]] <- 
+      intersections[[col]] * intersections$area_proportion
+  }
+}
+
+cat("Votes allocated\n")
+```
+
+## Aggregate by new district
+
+```{r aggregate-new-districts}
+cat("\nAggregating by new district...\n")
+
+# Drop geometry and aggregate
+new_district_results <- intersections %>%
+  st_drop_geometry() %>%
+  group_by(across(all_of(district_col[1]))) %>%
+  summarize(across(ends_with("_allocated"), ~sum(., na.rm = TRUE)), .groups = "drop")
+
+# Rename district column to standard name
+names(new_district_results)[1] <- "NEW_DISTRICT_ID"
+
+# Calculate totals for congressional races
+new_district_results <- new_district_results %>%
+  mutate(
+    dem_votes_allocated = CNGDEM01_allocated + CNGDEM02_allocated,
+    rep_votes_allocated = CNGREP01_allocated + CNGREP02_allocated,
+    total_cng_votes = dem_votes_allocated + rep_votes_allocated
+  )
+
+cat("\nNew district results calculated for", nrow(new_district_results), "districts\n")
+
+# Show sample
+cat("\nSample of new district results:\n")
+new_district_results %>%
+  select(NEW_DISTRICT_ID, dem_votes_allocated, rep_votes_allocated, total_cng_votes) %>%
+  head(10) %>%
+  knitr::kable(digits = 0)
+```
+
+## Write results
+
+```{r write-new-results}
+# Write results
+write_csv(new_district_results, "data/new_district_results.csv")
+
+cat("\n✓ New district results written to: data/new_district_results.csv\n")
+cat("✓ Part 5 complete!\n")
+
+# Summary statistics
+cat("\n=== SUMMARY ===\n")
+cat("Total Democratic votes allocated:", format(sum(new_district_results$dem_votes_allocated), big.mark=","), "\n")
+cat("Total Republican votes allocated:", format(sum(new_district_results$rep_votes_allocated), big.mark=","), "\n")
+cat("Total districts:", nrow(new_district_results), "\n")
+```
 
