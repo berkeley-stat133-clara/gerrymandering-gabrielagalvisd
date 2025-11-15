@@ -4,8 +4,444 @@ format: typst
 ---
 
 ### 2024 Election Results and the 2024 District Map
+## Load cleaned data
+
+```{r load-data}
+precinct_data <- read_csv("data/g24_sov_by_g24_svprec_clean.csv")
+
+# Check the column names to verify
+cat("Column names in precinct data:\n")
+cat(paste(names(precinct_data)[1:20], collapse=", "), "\n\n")
+
+# Verify we have the district column
+if(!"CDDIST" %in% names(precinct_data)) {
+  cat("ERROR: CDDIST column not found!\n")
+  cat("Available columns:", paste(names(precinct_data), collapse=", "), "\n")
+  stop("Missing required column CDDIST")
+}
+
+cat("Data loaded successfully:", nrow(precinct_data), "rows\n")
+```
+
+## Aggregate votes by district
+
+```{r aggregate}
+# Aggregate congressional votes by district
+# Note: CNGDEM01, CNGDEM02 are two different Democratic candidates
+# CNGREP01, CNGREP02 are two different Republican candidates
+# Due to CA's top-two primary, some races are Dem vs Dem or Rep vs Rep
+
+district_results <- precinct_data %>%
+  group_by(CDDIST) %>%
+  summarize(
+    # Sum all Democratic congressional votes
+    dem_votes = sum(CNGDEM01, na.rm = TRUE) + sum(CNGDEM02, na.rm = TRUE),
+    # Sum all Republican congressional votes
+    rep_votes = sum(CNGREP01, na.rm = TRUE) + sum(CNGREP02, na.rm = TRUE),
+    # Independent votes if any
+    ind_votes = sum(CNGIND01, na.rm = TRUE),
+    # Total votes cast
+    total_votes = sum(TOTVOTE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Calculate two-party vote share (excluding independents and third parties)
+    two_party_total = dem_votes + rep_votes,
+    dem_share = dem_votes / two_party_total,
+    rep_share = rep_votes / two_party_total,
+    winner = case_when(
+      dem_votes > rep_votes ~ "DEM",
+      rep_votes > dem_votes ~ "REP",
+      TRUE ~ "TIE"
+    )
+  ) %>%
+  # Remove any districts with no two-party votes (shouldn't happen but good to check)
+  filter(two_party_total > 0)
+
+cat("Number of districts:", nrow(district_results), "\n")
+cat("Districts won by Democrats:", sum(district_results$winner == "DEM"), "\n")
+cat("Districts won by Republicans:", sum(district_results$winner == "REP"), "\n\n")
+
+# Show sample of results
+district_results %>%
+  arrange(CDDIST) %>%
+  head(10) %>%
+  select(CDDIST, dem_votes, rep_votes, dem_share, winner) %>%
+  knitr::kable(digits = 3)
+```
+
+## Helper function for wasted votes
+
+```{r wasted-votes-function}
+# Wasted votes = votes beyond what's needed to win, or all votes if you lost
+calculate_wasted_votes <- function(party_a_votes, party_b_votes) {
+  total_votes <- party_a_votes + party_b_votes
+  votes_needed_to_win <- (total_votes / 2) + 1
+  
+  wasted_a <- if_else(
+    party_a_votes > party_b_votes,
+    # If party A won: wasted = votes beyond what was needed
+    party_a_votes - votes_needed_to_win,
+    # If party A lost: wasted = all their votes
+    party_a_votes
+  )
+  
+  return(wasted_a)
+}
+```
+
+## Calculate Mean-Median Score
+
+```{r mean-median}
+# Mean-median score = mean vote share - median vote share
+# Positive value indicates advantage for that party
+
+dem_mean <- mean(district_results$dem_share, na.rm = TRUE)
+dem_median <- median(district_results$dem_share, na.rm = TRUE)
+
+mean_median_score_2024 <- dem_mean - dem_median
+
+cat("=== Mean-Median Score (2024 Map) ===\n")
+cat("Democratic mean vote share:", round(dem_mean, 4), "\n")
+cat("Democratic median vote share:", round(dem_median, 4), "\n")
+cat("Mean-Median Score:", round(mean_median_score_2024, 4), "\n")
+cat("\nInterpretation:", 
+    if_else(mean_median_score_2024 > 0, 
+            "Positive score indicates slight Democratic advantage", 
+            "Negative score indicates slight Republican advantage"), "\n")
+```
+
+## Calculate Efficiency Gap
+
+```{r efficiency-gap}
+# Efficiency gap = (Party A wasted votes - Party B wasted votes) / Total votes
+# Measures asymmetry in wasted votes
+
+district_results <- district_results %>%
+  mutate(
+    dem_wasted = calculate_wasted_votes(dem_votes, rep_votes),
+    rep_wasted = calculate_wasted_votes(rep_votes, dem_votes)
+  )
+
+total_votes_all <- sum(district_results$two_party_total)
+total_dem_wasted <- sum(district_results$dem_wasted)
+total_rep_wasted <- sum(district_results$rep_wasted)
+
+efficiency_gap_2024 <- (total_rep_wasted - total_dem_wasted) / total_votes_all
+
+cat("\n=== Efficiency Gap (2024 Map) ===\n")
+cat("Total Democratic wasted votes:", format(total_dem_wasted, big.mark=","), "\n")
+cat("Total Republican wasted votes:", format(total_rep_wasted, big.mark=","), "\n")
+cat("Efficiency Gap:", round(efficiency_gap_2024, 4), "\n")
+cat("\nInterpretation:", 
+    if_else(efficiency_gap_2024 > 0, 
+            "Positive value indicates map favors Democrats", 
+            "Negative value indicates map favors Republicans"), "\n")
+cat("Magnitude:", abs(efficiency_gap_2024) * 100, "percentage points\n")
+cat("\nNote: Efficiency gaps above 7-8% are historically considered problematic\n")
+```
 
 
+```{r summary-2024}
+seats_dem_2024 <- sum(district_results$winner == "DEM")
+seats_rep_2024 <- sum(district_results$winner == "REP")
+total_seats <- nrow(district_results)
+
+cat("\n" , rep("=", 60), "\n", sep="")
+cat("SUMMARY: 2024 ELECTION RESULTS (Actual Map)\n")
+cat(rep("=", 60), "\n", sep="")
+cat("Total congressional districts:", total_seats, "\n")
+cat("Democratic seats:", seats_dem_2024, "(", round(100*seats_dem_2024/total_seats, 1), "%)\n")
+cat("Republican seats:", seats_rep_2024, "(", round(100*seats_rep_2024/total_seats, 1), "%)\n")
+cat("\nGerrymandering Metrics:\n")
+cat("  Mean-Median Score:", round(mean_median_score_2024, 4), "\n")
+cat("  Efficiency Gap:", round(efficiency_gap_2024, 4), "\n")
+cat(rep("=", 60), "\n", sep="")
+```
 
 ### 2024 Election Results and the proposed 2025 District Map
 
+```{r load-data}
+precinct_data <- read_csv("data/g24_sov_by_g24_svprec_clean.csv", show_col_types = FALSE)
+
+# Check that we have the data
+cat("Loaded precinct data:", nrow(precinct_data), "rows\n")
+```
+
+## Aggregate votes by district
+
+```{r aggregate}
+# Aggregate congressional votes by district
+# Note: CNGDEM01, CNGDEM02 are two different Democratic candidates
+# CNGREP01, CNGREP02 are two different Republican candidates
+# Due to CA's top-two primary, some races are Dem vs Dem or Rep vs Rep
+
+district_results <- precinct_data %>%
+  group_by(CDDIST) %>%
+  summarize(
+    # Sum all Democratic congressional votes
+    dem_votes = sum(CNGDEM01, na.rm = TRUE) + sum(CNGDEM02, na.rm = TRUE),
+    # Sum all Republican congressional votes
+    rep_votes = sum(CNGREP01, na.rm = TRUE) + sum(CNGREP02, na.rm = TRUE),
+    # Independent votes if any
+    ind_votes = sum(CNGIND01, na.rm = TRUE),
+    # Total votes cast
+    total_votes = sum(TOTVOTE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Calculate two-party vote share (excluding independents and third parties)
+    two_party_total = dem_votes + rep_votes,
+    dem_share = dem_votes / two_party_total,
+    rep_share = rep_votes / two_party_total,
+    winner = case_when(
+      dem_votes > rep_votes ~ "DEM",
+      rep_votes > dem_votes ~ "REP",
+      TRUE ~ "TIE"
+    )
+  ) %>%
+  # Remove any districts with no two-party votes (shouldn't happen but good to check)
+  filter(two_party_total > 0)
+
+cat("\n=== 2024 District Results ===\n")
+cat("Number of districts:", nrow(district_results), "\n")
+cat("Districts won by Democrats:", sum(district_results$winner == "DEM"), "\n")
+cat("Districts won by Republicans:", sum(district_results$winner == "REP"), "\n\n")
+
+# Show sample of results
+cat("Sample of district results:\n")
+district_results %>%
+  arrange(CDDIST) %>%
+  head(10) %>%
+  select(CDDIST, dem_votes, rep_votes, dem_share, winner) %>%
+  knitr::kable(digits = 3)
+```
+
+## Helper function for wasted votes
+
+```{r wasted-votes-function}
+# Wasted votes = votes beyond what's needed to win, or all votes if you lost
+calculate_wasted_votes <- function(party_a_votes, party_b_votes) {
+  total_votes <- party_a_votes + party_b_votes
+  votes_needed_to_win <- (total_votes / 2) + 1
+  
+  wasted_a <- if_else(
+    party_a_votes > party_b_votes,
+    # If party A won: wasted = votes beyond what was needed
+    party_a_votes - votes_needed_to_win,
+    # If party A lost: wasted = all their votes
+    party_a_votes
+  )
+  
+  return(wasted_a)
+}
+```
+## Calculate Mean-Median Score
+
+```{r mean-median}
+# Mean-median score = mean vote share - median vote share
+# Positive value indicates advantage for that party
+
+dem_mean <- mean(district_results$dem_share, na.rm = TRUE)
+dem_median <- median(district_results$dem_share, na.rm = TRUE)
+
+mean_median_score_2024 <- dem_mean - dem_median
+
+cat("\n=== Mean-Median Score (2024 Map) ===\n")
+cat("Democratic mean vote share:", round(dem_mean, 4), "\n")
+cat("Democratic median vote share:", round(dem_median, 4), "\n")
+cat("Mean-Median Score:", round(mean_median_score_2024, 4), "\n")
+cat("\nInterpretation:", 
+    if_else(mean_median_score_2024 > 0, 
+            "Positive score indicates slight Democratic advantage", 
+            "Negative score indicates slight Republican advantage"), "\n")
+```
+
+## Calculate Efficiency Gap
+
+```{r efficiency-gap}
+# Efficiency gap = (Party A wasted votes - Party B wasted votes) / Total votes
+# Measures asymmetry in wasted votes
+
+district_results <- district_results %>%
+  mutate(
+    dem_wasted = calculate_wasted_votes(dem_votes, rep_votes),
+    rep_wasted = calculate_wasted_votes(rep_votes, dem_votes)
+  )
+
+total_votes_all <- sum(district_results$two_party_total)
+total_dem_wasted <- sum(district_results$dem_wasted)
+total_rep_wasted <- sum(district_results$rep_wasted)
+
+efficiency_gap_2024 <- (total_rep_wasted - total_dem_wasted) / total_votes_all
+
+cat("\n=== Efficiency Gap (2024 Map) ===\n")
+cat("Total Democratic wasted votes:", format(total_dem_wasted, big.mark=","), "\n")
+cat("Total Republican wasted votes:", format(total_rep_wasted, big.mark=","), "\n")
+cat("Efficiency Gap:", round(efficiency_gap_2024, 4), "\n")
+cat("\nInterpretation:", 
+    if_else(efficiency_gap_2024 > 0, 
+            "Positive value indicates map favors Democrats", 
+            "Negative value indicates map favors Republicans"), "\n")
+cat("Magnitude:", round(abs(efficiency_gap_2024) * 100, 2), "percentage points\n")
+cat("\nNote: Efficiency gaps above 7-8% are historically considered problematic\n")
+```
+## Summary of 2024 Results
+
+```{r summary-2024}
+seats_dem_2024 <- sum(district_results$winner == "DEM")
+seats_rep_2024 <- sum(district_results$winner == "REP")
+total_seats <- nrow(district_results)
+
+cat("\n", rep("=", 70), "\n", sep="")
+cat("SUMMARY: 2024 ELECTION RESULTS (Actual Map)\n")
+cat(rep("=", 70), "\n", sep="")
+cat("Total congressional districts:", total_seats, "\n")
+cat("Democratic seats:", seats_dem_2024, "(", round(100*seats_dem_2024/total_seats, 1), "%)\n")
+cat("Republican seats:", seats_rep_2024, "(", round(100*seats_rep_2024/total_seats, 1), "%)\n")
+cat("\nGerrymandering Metrics:\n")
+cat("  Mean-Median Score:", round(mean_median_score_2024, 4), "\n")
+cat("  Efficiency Gap:", round(efficiency_gap_2024, 4), 
+    "(", round(abs(efficiency_gap_2024) * 100, 2), "pp )\n")
+cat(rep("=", 70), "\n", sep="")
+```
+
+### Part 6
+
+```{r load-new-results}
+# This file should be created in Part 5 (data-cleaning.qmd)
+# If you don't have it yet, you need to complete Part 5 first
+
+if(!file.exists("data/new_district_results.csv")) {
+  cat("\n", rep("=", 70), "\n", sep="")
+  cat("WARNING: new_district_results.csv not found!\n")
+  cat(rep("=", 70), "\n", sep="")
+  cat("\nYou need to complete Part 5 first to generate this file.\n")
+  cat("Part 5 performs the redistricting calculation.\n\n")
+  cat("SKIPPING Part 6 for now.\n")
+  cat("Please complete Part 5 and re-run this file.\n")
+  cat(rep("=", 70), "\n\n", sep="")
+  
+  knitr::knit_exit()
+}
+
+new_district_results <- read_csv("data/new_district_results.csv", show_col_types = FALSE)
+
+cat("\n=== Loading Proposed Map Results ===\n")
+cat("Loaded hypothetical results for", nrow(new_district_results), "districts\n")
+
+# Calculate vote shares and winners
+new_district_results <- new_district_results %>%
+  mutate(
+    two_party_total = dem_votes_allocated + rep_votes_allocated,
+    dem_share = dem_votes_allocated / two_party_total,
+    rep_share = rep_votes_allocated / two_party_total,
+    winner = case_when(
+      dem_votes_allocated > rep_votes_allocated ~ "DEM",
+      rep_votes_allocated > dem_votes_allocated ~ "REP",
+      TRUE ~ "TIE"
+    )
+  ) %>%
+  filter(two_party_total > 0)
+
+cat("Districts won by Democrats:", sum(new_district_results$winner == "DEM"), "\n")
+cat("Districts won by Republicans:", sum(new_district_results$winner == "REP"), "\n")
+```
+
+## Calculate metrics for proposed map
+
+```{r new-metrics}
+# Mean-median
+dem_mean_new <- mean(new_district_results$dem_share, na.rm = TRUE)
+dem_median_new <- median(new_district_results$dem_share, na.rm = TRUE)
+mean_median_score_new <- dem_mean_new - dem_median_new
+
+cat("\n=== Mean-Median Score (Proposed Map) ===\n")
+cat("Democratic mean vote share:", round(dem_mean_new, 4), "\n")
+cat("Democratic median vote share:", round(dem_median_new, 4), "\n")
+cat("Mean-Median Score:", round(mean_median_score_new, 4), "\n")
+
+# Efficiency gap
+new_district_results <- new_district_results %>%
+  mutate(
+    dem_wasted = calculate_wasted_votes(dem_votes_allocated, rep_votes_allocated),
+    rep_wasted = calculate_wasted_votes(rep_votes_allocated, dem_votes_allocated)
+  )
+
+total_votes_new <- sum(new_district_results$two_party_total)
+total_dem_wasted_new <- sum(new_district_results$dem_wasted)
+total_rep_wasted_new <- sum(new_district_results$rep_wasted)
+
+efficiency_gap_new <- (total_rep_wasted_new - total_dem_wasted_new) / total_votes_new
+
+cat("\n=== Efficiency Gap (Proposed Map) ===\n")
+cat("Total Democratic wasted votes:", format(total_dem_wasted_new, big.mark=","), "\n")
+cat("Total Republican wasted votes:", format(total_rep_wasted_new, big.mark=","), "\n")
+cat("Efficiency Gap:", round(efficiency_gap_new, 4), 
+    "(", round(abs(efficiency_gap_new) * 100, 2), "pp )\n")
+
+# Seat counts
+seats_dem_new <- sum(new_district_results$winner == "DEM")
+seats_rep_new <- sum(new_district_results$winner == "REP")
+total_seats_new <- nrow(new_district_results)
+```
+
+## Summary and Comparison
+
+```{r comparison}
+cat("\n", rep("=", 70), "\n", sep="")
+cat("SUMMARY: PROPOSED MAP RESULTS (AB 604)\n")
+cat(rep("=", 70), "\n", sep="")
+cat("Total congressional districts:", total_seats_new, "\n")
+cat("Democratic seats:", seats_dem_new, "(", round(100*seats_dem_new/total_seats_new, 1), "%)\n")
+cat("Republican seats:", seats_rep_new, "(", round(100*seats_rep_new/total_seats_new, 1), "%)\n")
+cat("\nGerrymandering Metrics:\n")
+cat("  Mean-Median Score:", round(mean_median_score_new, 4), "\n")
+cat("  Efficiency Gap:", round(efficiency_gap_new, 4), 
+    "(", round(abs(efficiency_gap_new) * 100, 2), "pp )\n")
+cat(rep("=", 70), "\n\n", sep="")
+
+cat(rep("=", 70), "\n", sep="")
+cat("COMPARISON: 2024 MAP vs. PROPOSED MAP\n")
+cat(rep("=", 70), "\n", sep="")
+cat("Change in Democratic seats:", seats_dem_new - seats_dem_2024, "\n")
+cat("Change in Republican seats:", seats_rep_new - seats_rep_2024, "\n")
+cat("\nChange in Gerrymandering Metrics:\n")
+cat("  Mean-Median Score change:", round(mean_median_score_new - mean_median_score_2024, 4), "\n")
+cat("  Efficiency Gap change:", round(efficiency_gap_new - efficiency_gap_2024, 4), "\n")
+cat(rep("=", 70), "\n\n", sep="")
+
+cat(rep("=", 70), "\n", sep="")
+cat("ANSWER TO RESEARCH QUESTION\n")
+cat(rep("=", 70), "\n", sep="")
+cat("Will the adoption of the new district map lead to an increase\n")
+cat("in partisan advantage relative to 2024?\n\n")
+
+# Determine if partisan advantage increased
+eg_change <- abs(efficiency_gap_new) - abs(efficiency_gap_2024)
+mm_change <- abs(mean_median_score_new) - abs(mean_median_score_2024)
+
+if(eg_change > 0.02 | mm_change > 0.02) {
+  cat("YES, the proposed map increases partisan advantage.\n\n")
+  cat("The absolute efficiency gap changed by", 
+      round(eg_change * 100, 2), "percentage points.\n")
+  cat("The absolute mean-median score changed by", 
+      round(mm_change, 4), ".\n")
+  cat("\nThis suggests the new map is MORE gerrymandered than the 2024 map.\n")
+} else if(eg_change < -0.02 | mm_change < -0.02) {
+  cat("NO, the proposed map actually DECREASES partisan advantage.\n\n")
+  cat("The absolute efficiency gap changed by", 
+      round(eg_change * 100, 2), "percentage points.\n")
+  cat("The absolute mean-median score changed by", 
+      round(mm_change, 4), ".\n")
+  cat("\nThis suggests the new map is LESS gerrymandered than the 2024 map.\n")
+} else {
+  cat("The change is minimal - partisan advantage remains similar.\n\n")
+  cat("The absolute efficiency gap changed by only", 
+      round(eg_change * 100, 2), "percentage points.\n")
+  cat("The absolute mean-median score changed by", 
+      round(mm_change, 4), ".\n")
+  cat("\nThis suggests no significant change in gerrymandering.\n")
+}
+cat(rep("=", 70), "\n", sep="")
+```
